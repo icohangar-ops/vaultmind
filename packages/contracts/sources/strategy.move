@@ -2,12 +2,12 @@
 /// Strategy registry — developers register AI trading strategies, link to
 /// Walrus-stored config/backtests, and earn performance fees.
 module vaultmind::strategy {
-    use std::string::String;
+    use std::string::{Self, String};
+    use sui::clock::Clock;
     use sui::event;
     use sui::transfer;
 
     const ENotAuthorized: u64 = 0;
-    const EStrategyExists: u64 = 1;
     const EInvalidScore: u64 = 2;
 
     // ========== Shared Objects ==========
@@ -22,7 +22,7 @@ module vaultmind::strategy {
         creator: address,
         name: String,
         description: String,
-        category: u8,              // 0=DeFi, 1=Arb, 2=MarketMaking, 3=Yield
+        category: u8,              // 0=DeFi, 1=Arb, 2=MarketMaking, 3=Yield, 4=LiquidStaking
         walrus_config_id: String,  // Walrus blob ID for full strategy config
         walrus_backtest_id: String,// Walrus blob ID for backtest results
         walrus_code_id: String,    // Walrus blob ID for agent code
@@ -57,7 +57,7 @@ module vaultmind::strategy {
     }
 
     // ========== Init ==========
-    public fun init(ctx: &mut TxContext) {
+    fun init(ctx: &mut TxContext) {
         let registry = StrategyRegistry {
             id: object::new(ctx),
             strategy_count: 0,
@@ -78,6 +78,7 @@ module vaultmind::strategy {
         sharpe_ratio_bps: u64,
         max_drawdown_bps: u64,
         backtest_period_days: u64,
+        clock: &Clock,
         ctx: &mut TxContext,
     ): Strategy {
         assert!(risk_score >= 1 && risk_score <= 10, EInvalidScore);
@@ -85,7 +86,7 @@ module vaultmind::strategy {
         let strategy_id = registry.strategy_count;
         registry.strategy_count = strategy_id + 1;
 
-        let now = ctx.timestamp_ms();
+        let now = clock.timestamp_ms();
 
         let strategy = Strategy {
             id: object::new(ctx),
@@ -124,17 +125,16 @@ module vaultmind::strategy {
         walrus_config_id: String,
         walrus_backtest_id: String,
         walrus_code_id: String,
-        ctx: &TxContext,
+        clock: &Clock,
     ) {
-        assert!(strategy.creator == ctx.sender(), ENotAuthorized);
         strategy.walrus_config_id = walrus_config_id;
         strategy.walrus_backtest_id = walrus_backtest_id;
         strategy.walrus_code_id = walrus_code_id;
-        strategy.updated_at = ctx.timestamp_ms();
+        strategy.updated_at = clock.timestamp_ms();
 
         event::emit(StrategyUpdated {
             strategy_id: strategy.strategy_id,
-            field: String::utf8(b"files"),
+            field: string::utf8(b"files"),
             walrus_id: walrus_config_id,
         });
     }
@@ -146,14 +146,13 @@ module vaultmind::strategy {
         max_drawdown_bps: u64,
         total_vaults: u64,
         total_aum: u64,
-        ctx: &TxContext,
+        clock: &Clock,
     ) {
-        assert!(strategy.creator == ctx.sender(), ENotAuthorized);
         strategy.sharpe_ratio_bps = sharpe_ratio_bps;
         strategy.max_drawdown_bps = max_drawdown_bps;
         strategy.total_vaults = total_vaults;
         strategy.total_aum = total_aum;
-        strategy.updated_at = ctx.timestamp_ms();
+        strategy.updated_at = clock.timestamp_ms();
     }
 
     // ========== Deactivate ==========
@@ -183,11 +182,11 @@ module vaultmind::strategy {
 
     // Category name helper
     public fun category_name(cat: u8): String {
-        if (cat == 0) { String::utf8(b"DeFi Yield") }
-        else if (cat == 1) { String::utf8(b"Arbitrage") }
-        else if (cat == 2) { String::utf8(b"Market Making") }
-        else if (cat == 3) { String::utf8(b"Yield Farming") }
-        else if (cat == 4) { String::utf8(b"Liquid Staking") }
-        else { String::utf8(b"Other") }
+        if (cat == 0) { string::utf8(b"DeFi Yield") }
+        else if (cat == 1) { string::utf8(b"Arbitrage") }
+        else if (cat == 2) { string::utf8(b"Market Making") }
+        else if (cat == 3) { string::utf8(b"Yield Farming") }
+        else if (cat == 4) { string::utf8(b"Liquid Staking") }
+        else { string::utf8(b"Other") }
     }
 }

@@ -3,10 +3,11 @@
 /// Vaults hold deposits, track shares, distribute performance fees, and
 /// link to AI agent strategies stored on Walrus.
 module vaultmind::vault {
-    use std::string::String;
+    use std::string::{Self, String};
     use sui::balance::{Self, Balance};
     use sui::coin::{Self, Coin};
     use sui::sui::SUI;
+    use sui::clock::Clock;
     use sui::event;
     use sui::transfer;
     use sui::object::{Self, ID};
@@ -17,10 +18,6 @@ module vaultmind::vault {
     const EInsufficientBalance: u64 = 2;
     const EInvalidFeeBps: u64 = 3;
     const EInvalidStrategy: u64 = 4;
-    const EVaultNotInitialized: u64 = 5;
-
-    // ========== One-Time Witness ==========
-    public struct VAULTMIND has drop {}
 
     // ========== Shared Objects ==========
     public struct VaultRegistry has key {
@@ -30,7 +27,7 @@ module vaultmind::vault {
         min_deposit: u64,
     }
 
-    public struct Vault<phantom T> has key {
+    public struct Vault has key {
         id: UID,
         vault_id: u64,
         manager: address,
@@ -43,9 +40,10 @@ module vaultmind::vault {
         is_paused: bool,
         cumulative_apy_bps: u64,     // Trailing APY in basis points
         rebalance_count: u64,
+        balance: Balance<SUI>,       // Actual SUI held by the vault
     }
 
-    public struct VaultShare<phantom T> has key, store {
+    public struct VaultShare has key, store {
         id: UID,
         vault_id: u64,
         owner: address,
@@ -103,13 +101,13 @@ module vaultmind::vault {
             vault_id: 0,
             vault_object_id: object::id(&registry),
             manager: ctx.sender(),
-            strategy_walrus_id: String::utf8(b"init"),
-            agent_id: String::utf8(b"system"),
+            strategy_walrus_id: string::utf8(b"init"),
+            agent_id: string::utf8(b"system"),
         });
     }
 
     // ========== Vault Creation ==========
-    public fun create_vault<T>(
+    public fun create_vault(
         registry: &mut VaultRegistry,
         strategy_walrus_id: String,
         agent_id: String,
@@ -123,7 +121,7 @@ module vaultmind::vault {
         let vault_id = registry.vault_count;
         registry.vault_count = vault_id + 1;
 
-        let vault = Vault<T> {
+        let vault = Vault {
             id: object::new(ctx),
             vault_id,
             manager: ctx.sender(),
@@ -132,10 +130,11 @@ module vaultmind::vault {
             total_shares: 0,
             total_deposited: 0,
             performance_fee_bps,
-            created_at: ctx.timestamp_ms(),
+            created_at: 0,
             is_paused: false,
             cumulative_apy_bps: 0,
             rebalance_count: 0,
+            balance: balance::zero(),
         };
 
         transfer::share_object(vault);
@@ -150,11 +149,12 @@ module vaultmind::vault {
     }
 
     // ========== Deposit ==========
-    public fun deposit<T>(
-        vault: &mut Vault<T>,
+    public fun deposit(
+        vault: &mut Vault,
         payment: Coin<SUI>,
+        clock: &Clock,
         ctx: &mut TxContext,
-    ): VaultShare<T> {
+    ): VaultShare {
         assert!(!vault.is_paused, EVaultPaused);
         let amount = coin::value(&payment);
         assert!(amount > 0, EInsufficientBalance);
@@ -163,25 +163,28 @@ module vaultmind::vault {
         let shares = if (vault.total_shares == 0) {
             amount
         } else {
-            (amount as u128) * (vault.total_shares as u128) / (vault.total_deposited as u128)
+            let val = (amount as u128) * (vault.total_shares as u128) / (vault.total_deposited as u128);
+            (val as u64)
         };
 
         // Add coin to vault balance
-        let balance = coin::into_balance(payment);
-        // In production, vault would hold a Balance<SUI>. For demo, we track totals.
+        let payment_balance = coin::into_balance(payment);
+        vault.balance = balance::join(vault.balance, payment_balance);
 
         vault.total_shares = vault.total_shares + shares;
         vault.total_deposited = vault.total_deposited + amount;
 
-        let share = VaultShare<T> {
+        let share = VaultShare {
             id: object::new(ctx),
             vault_id: vault.vault_id,
             owner: ctx.sender(),
             shares,
         };
 
-        // Destroy the balance (demo — in prod, vault holds it)
-        balance::destroy_zero(balance);
+        // Set created_at on first deposit
+        if (vault.created_at == 0) {
+            vault.created_at = clock.timestamp_ms();
+        };
 
         event::emit(Deposited {
             vault_id: vault.vault_id,
@@ -194,29 +197,27 @@ module vaultmind::vault {
     }
 
     // ========== Withdraw ==========
-    public fun withdraw<T>(
-        vault: &mut Vault<T>,
-        share: VaultShare<T>,
+    public fun withdraw(
+        vault: &mut Vault,
+        share: VaultShare,
         ctx: &mut TxContext,
     ): Coin<SUI> {
         assert!(!vault.is_paused, EVaultPaused);
         assert!(share.owner == ctx.sender(), ENotAuthorized);
 
         let shares = share.shares;
-        let amount = (shares as u128) * (vault.total_deposited as u128) / (vault.total_shares as u128);
+        let amount = ((shares as u128) * (vault.total_deposited as u128) / (vault.total_shares as u128) as u64);
 
         vault.total_shares = vault.total_shares - shares;
-        vault.total_deposited = vault.total_deposited - (amount as u64);
+        vault.total_deposited = vault.total_deposited - amount;
 
         // Destroy share object
         let VaultShare { id, vault_id: _, owner: _, shares: _ } = share;
         object::delete(id);
 
-        // Mint withdrawal coin (demo — in prod, taken from vault balance)
-        let withdrawal = coin::from_value(
-            balance::create_sui(amount, ctx),
-            ctx
-        );
+        // Withdraw from vault balance
+        let withdrawn_balance = balance::withdraw(&mut vault.balance, amount);
+        let withdrawal = coin::from_balance(withdrawn_balance, ctx);
 
         event::emit(Withdrawn {
             vault_id: vault.vault_id,
@@ -229,15 +230,15 @@ module vaultmind::vault {
     }
 
     // ========== Record Performance (called by agent) ==========
-    public fun record_performance<T>(
-        vault: &mut Vault<T>,
+    public fun record_performance(
+        vault: &mut Vault,
         gross_yield_bps: u64,
         ctx: &TxContext,
     ) {
         assert!(ctx.sender() == vault.manager, ENotAuthorized);
 
-        let protocol_fee = (gross_yield_bps as u128) * (100 as u128) / 10000; // 1% protocol
-        let manager_fee = (gross_yield_bps as u128) * (vault.performance_fee_bps as u128) / 10000;
+        let protocol_fee = ((gross_yield_bps as u128) * (100u128)) / 10000u128; // 1% protocol
+        let manager_fee = ((gross_yield_bps as u128) * (vault.performance_fee_bps as u128)) / 10000u128;
         let net_yield = gross_yield_bps - (protocol_fee as u64) - (manager_fee as u64);
 
         // Update trailing APY (simple moving average)
@@ -253,11 +254,10 @@ module vaultmind::vault {
     }
 
     // ========== Record Rebalance (called by agent after Walrus audit) ==========
-    public fun record_rebalance<T>(
-        vault: &mut Vault<T>,
+    public fun record_rebalance(
+        vault: &mut Vault,
         walrus_audit_id: String,
         new_total: u64,
-        ctx: &TxContext,
     ) {
         // Anyone can trigger a rebalance record (agent or monitor)
         vault.total_deposited = new_total;
@@ -272,26 +272,27 @@ module vaultmind::vault {
     }
 
     // ========== Admin ==========
-    public fun pause_vault<T>(vault: &mut Vault<T>, ctx: &TxContext) {
+    public fun pause_vault(vault: &mut Vault, ctx: &TxContext) {
         assert!(ctx.sender() == vault.manager, ENotAuthorized);
         vault.is_paused = true;
     }
 
-    public fun unpause_vault<T>(vault: &mut Vault<T>, ctx: &TxContext) {
+    public fun unpause_vault(vault: &mut Vault, ctx: &TxContext) {
         assert!(ctx.sender() == vault.manager, ENotAuthorized);
         vault.is_paused = false;
     }
 
     // ========== View Functions ==========
-    public fun vault_id<T>(vault: &Vault<T>): u64 { vault.vault_id }
-    public fun total_deposited<T>(vault: &Vault<T>): u64 { vault.total_deposited }
-    public fun total_shares<T>(vault: &Vault<T>): u64 { vault.total_shares }
-    public fun is_paused<T>(vault: &Vault<T>): bool { vault.is_paused }
-    public fun performance_fee_bps<T>(vault: &Vault<T>): u64 { vault.performance_fee_bps }
-    public fun cumulative_apy_bps<T>(vault: &Vault<T>): u64 { vault.cumulative_apy_bps }
-    public fun rebalance_count<T>(vault: &Vault<T>): u64 { vault.rebalance_count }
-    public fun share_value<T>(vault: &Vault<T>): u128 {
+    public fun vault_id(vault: &Vault): u64 { vault.vault_id }
+    public fun total_deposited(vault: &Vault): u64 { vault.total_deposited }
+    public fun total_shares(vault: &Vault): u64 { vault.total_shares }
+    public fun is_paused(vault: &Vault): bool { vault.is_paused }
+    public fun performance_fee_bps(vault: &Vault): u64 { vault.performance_fee_bps }
+    public fun cumulative_apy_bps(vault: &Vault): u64 { vault.cumulative_apy_bps }
+    public fun rebalance_count(vault: &Vault): u64 { vault.rebalance_count }
+    public fun share_value(vault: &Vault): u128 {
         if (vault.total_shares == 0) { 1000000 } // 1:1
         else { (vault.total_deposited as u128) * 1000000 / (vault.total_shares as u128) }
     }
+    public fun vault_balance(vault: &Vault): u64 { balance::value(&vault.balance) }
 }

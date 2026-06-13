@@ -2,13 +2,12 @@
 /// Agent identity and governance — agents register on-chain, link to
 /// off-chain execution infrastructure, and maintain reputation scores.
 module vaultmind::agent {
-    use std::string::String;
+    use std::string::{Self, String};
+    use sui::clock::Clock;
     use sui::event;
     use sui::transfer;
 
     const ENotAuthorized: u64 = 0;
-    const EInvalidReputation: u64 = 1;
-    const EAgentExists: u64 = 2;
 
     public struct AgentRegistry has key {
         id: UID,
@@ -57,7 +56,7 @@ module vaultmind::agent {
     }
 
     // ========== Init ==========
-    public fun init(ctx: &mut TxContext) {
+    fun init(ctx: &mut TxContext) {
         let registry = AgentRegistry {
             id: object::new(ctx),
             agent_count: 0,
@@ -72,11 +71,12 @@ module vaultmind::agent {
         description: String,
         endpoint: String,
         walrus_memory_id: String,
+        clock: &Clock,
         ctx: &mut TxContext,
     ): Agent {
         let agent_id = registry.agent_count;
         registry.agent_count = agent_id + 1;
-        let now = ctx.timestamp_ms();
+        let now = clock.timestamp_ms();
 
         let agent = Agent {
             id: object::new(ctx),
@@ -113,7 +113,7 @@ module vaultmind::agent {
         success: bool,
         profit_delta: u64,
         walrus_audit_id: String,
-        ctx: &TxContext,
+        clock: &Clock,
     ) {
         agent.total_executions = agent.total_executions + 1;
         if (success) {
@@ -121,19 +121,19 @@ module vaultmind::agent {
             agent.total_profit_generated = agent.total_profit_generated + profit_delta;
         } else {
             agent.failed_executions = agent.failed_executions + 1;
-        }
-        agent.last_execution_at = ctx.timestamp_ms();
+        };
+        agent.last_execution_at = clock.timestamp_ms();
 
         // Auto-adjust reputation
         let old_rep = agent.reputation_bps;
-        if (success && profit_delta > 0 {
+        if (success && (profit_delta > 0)) {
             // Boost reputation by up to 50 bps per good execution
-            let boost = if (profit_delta > 1_000_000_000) { 50 }
-                        else if (profit_delta > 100_000_000) { 25 }
-                        else { 10 };
+            let boost = if (profit_delta > 1_000_000_000) { 50u64 }
+                        else if (profit_delta > 100_000_000) { 25u64 }
+                        else { 10u64 };
             agent.reputation_bps = if (agent.reputation_bps + boost > 10000) { 10000 }
                                   else { agent.reputation_bps + boost };
-        } else if (!success {
+        } else if (!success) {
             // Reduce reputation
             agent.reputation_bps = if (agent.reputation_bps < 100) { 0 }
                                   else { agent.reputation_bps - 100 };
@@ -152,8 +152,8 @@ module vaultmind::agent {
                 agent_id: agent.agent_id,
                 old_reputation: old_rep,
                 new_reputation: agent.reputation_bps,
-                reason: if (success) { String::utf8(b"successful_execution") }
-                        else { String::utf8(b"failed_execution") },
+                reason: if (success) { string::utf8(b"successful_execution") }
+                        else { string::utf8(b"failed_execution") },
             });
         }
     }
@@ -179,7 +179,7 @@ module vaultmind::agent {
     public fun reputation_bps(a: &Agent): u64 { a.reputation_bps }
     public fun success_rate_bps(a: &Agent): u64 {
         if (a.total_executions == 0) { 0 }
-        else { (a.successful_executions as u128) * 10000 / (a.total_executions as u128) as u64 }
+        else { ((a.successful_executions as u128) * 10000 / (a.total_executions as u128) as u64) }
     }
     public fun total_profit_generated(a: &Agent): u64 { a.total_profit_generated }
     public fun is_active(a: &Agent): bool { a.is_active }

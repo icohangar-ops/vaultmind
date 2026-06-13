@@ -3,12 +3,8 @@
 /// in a single transaction.
 module vaultmind::agent_factory {
     use std::string::String;
-    use sui::coin::Coin;
+    use sui::clock::Clock;
     use sui::event;
-    use sui::transfer;
-    use vaultmind::vault::{Self, Vault, VaultShare};
-    use vaultmind::strategy::{Self, Strategy};
-    use vaultmind::agent::{Self, Agent};
 
     // ========== Events ==========
     public struct AgentVaultDeployed has copy, drop {
@@ -42,10 +38,11 @@ module vaultmind::agent_factory {
         walrus_memory_id: String,
         // Vault params
         performance_fee_bps: u64,
+        clock: &Clock,
         ctx: &mut TxContext,
     ) {
         // 1. Register strategy
-        let strategy = vaultmind::strategy::register_strategy(
+        let _strategy = vaultmind::strategy::register_strategy(
             strategy_registry,
             strategy_name,
             strategy_desc,
@@ -57,30 +54,33 @@ module vaultmind::agent_factory {
             sharpe_bps,
             max_dd_bps,
             backtest_days,
+            clock,
             ctx,
         );
+        // Note: strategy is transferred to the caller (not shared)
 
         // 2. Register agent
-        let agent = vaultmind::agent::register_agent(
+        let _agent = vaultmind::agent::register_agent(
             agent_registry,
             agent_name,
             agent_desc,
             agent_endpoint,
             walrus_memory_id,
+            clock,
             ctx,
         );
 
         // 3. Create vault linked to strategy
-        vaultmind::vault::create_vault<SUI>(
+        vaultmind::vault::create_vault(
             vault_registry,
-            walrus_config_id, // Strategy's Walrus config ID
-            agent_name,       // Agent ID reference
+            walrus_config_id,
+            agent_name,
             performance_fee_bps,
             ctx,
         );
 
         event::emit(AgentVaultDeployed {
-            agent_id: 0, // Would reference actual IDs
+            agent_id: 0,
             strategy_id: 0,
             vault_id: 0,
             deployer: ctx.sender(),
