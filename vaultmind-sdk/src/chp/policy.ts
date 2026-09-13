@@ -9,7 +9,7 @@
  */
 
 import { readFileSync, existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 
 export type ChpAction = "buy" | "sell" | "rebalance";
 
@@ -42,28 +42,76 @@ export function defaultPolicy(): RiskPolicy {
   };
 }
 
+/** Allowed root for policy files (`<cwd>/config`). */
+export function defaultPolicyBase(): string {
+  return resolve(process.cwd(), "config");
+}
+
 /** Default location of the policy file (config/policy.yaml under cwd). */
 export function defaultPolicyPath(): string {
-  return resolve(process.cwd(), "config", "policy.yaml");
+  return resolve(defaultPolicyBase(), "policy.yaml");
+}
+
+function isPathInsideBase(resolvedPath: string, resolvedBase: string): boolean {
+  const rel = relative(resolvedBase, resolvedPath);
+  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
+    return false;
+  }
+  // Prefix check is SAST-friendly and blocks `/base` vs `/base-evil` collisions.
+  return resolvedPath.startsWith(resolvedBase + sep);
+}
+
+/**
+ * Resolve `policyPath` under `allowedBase` (default: `<cwd>/config`) and reject
+ * path traversal or any path that escapes that base before a file is read.
+ */
+export function resolvePolicyPath(
+  policyPath: string,
+  allowedBase: string = defaultPolicyBase(),
+): string {
+  const resolvedBase = resolve(allowedBase);
+  const resolvedPath = isAbsolute(policyPath)
+    ? resolve(policyPath)
+    : resolve(resolvedBase, policyPath);
+
+  if (!isPathInsideBase(resolvedPath, resolvedBase)) {
+    throw new Error(
+      `Rejected policy path outside allowed base ${resolvedBase}: ${policyPath}`,
+    );
+  }
+  return resolvedPath;
 }
 
 /**
  * Load a risk policy from a flat YAML file. Returns a conservative default (and
- * logs a warning) if the file is missing or cannot be parsed — non-breaking.
+ * logs a warning) if the file is missing, escapes the allowed base, or cannot
+ * be parsed — non-breaking. The resolved path is constrained to
+ * `<cwd>/config` (or a caller-supplied base) before any filesystem read.
  */
-export function loadPolicy(policyPath: string = defaultPolicyPath()): RiskPolicy {
-  if (!existsSync(policyPath)) {
+export function loadPolicy(
+  policyPath: string = defaultPolicyPath(),
+  allowedBase: string = defaultPolicyBase(),
+): RiskPolicy {
+  let safePath: string;
+  try {
+    safePath = resolvePolicyPath(policyPath, allowedBase);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[CHP] ${msg} — using conservative default policy`);
+    return defaultPolicy();
+  }
+  if (!existsSync(safePath)) {
     console.warn(
-      `[CHP] policy file not found at ${policyPath} — using conservative default policy`,
+      `[CHP] policy file not found at ${safePath} — using conservative default policy`,
     );
     return defaultPolicy();
   }
   try {
-    const raw = readFileSync(policyPath, "utf8");
+    const raw = readFileSync(safePath, "utf8");
     return coercePolicy(parseFlatYaml(raw));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[CHP] failed to parse policy ${policyPath} (${msg}) — using default policy`);
+    console.warn(`[CHP] failed to parse policy ${safePath} (${msg}) — using default policy`);
     return defaultPolicy();
   }
 }
