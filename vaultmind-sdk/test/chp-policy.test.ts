@@ -7,7 +7,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -59,8 +59,14 @@ test("resolvePolicyPath rejects traversal and off-base absolute paths", () => {
   assert.throws(() => resolvePolicyPath("../package.json"), /outside allowed base/);
   assert.throws(() => resolvePolicyPath("../../../../etc/passwd"), /outside allowed base/);
   assert.throws(() => resolvePolicyPath("/etc/passwd"), /outside allowed base/);
+  assert.throws(() => resolvePolicyPath("..\\..\\etc\\passwd"), /outside allowed base/);
   assert.doesNotThrow(() => resolvePolicyPath("policy.yaml"));
   assert.doesNotThrow(() => resolvePolicyPath(defaultPolicyPath()));
+  // In-tree collapse of `..` stays under the allowed base.
+  assert.equal(
+    resolvePolicyPath("subdir/../policy.yaml"),
+    resolve(defaultPolicyBase(), "policy.yaml"),
+  );
 });
 
 test("rejects path traversal and does not read files outside the allowed base", () => {
@@ -80,6 +86,48 @@ test("rejects path traversal and does not read files outside the allowed base", 
 
     const fromEtc = loadPolicy("/etc/passwd");
     assert.equal(fromEtc.version, "1.0-default");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("accepts a nested path and in-tree `..` collapse under the allowed base", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "vm-policy-nested-"));
+  try {
+    mkdirSync(join(tmp, "team"));
+    writeFileSync(
+      join(tmp, "team", "policy.yaml"),
+      ["version: nested", "max_notional_usd: 7"].join("\n"),
+    );
+    writeFileSync(
+      join(tmp, "policy.yaml"),
+      ["version: collapsed", "max_notional_usd: 9"].join("\n"),
+    );
+    const nested = loadPolicy("team/policy.yaml", tmp);
+    assert.equal(nested.version, "nested");
+    assert.equal(nested.maxNotionalUsd, 7);
+
+    const collapsed = loadPolicy("team/../policy.yaml", tmp);
+    assert.equal(collapsed.version, "collapsed");
+    assert.equal(collapsed.maxNotionalUsd, 9);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("rejects a symlink that escapes the allowed base", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "vm-policy-symlink-"));
+  try {
+    const outside = join(tmp, "secrets.yaml");
+    writeFileSync(
+      outside,
+      ["version: \"pwned\"", "max_notional_usd: 1"].join("\n"),
+    );
+    const base = join(tmp, "config");
+    mkdirSync(base);
+    symlinkSync(outside, join(base, "policy.yaml"));
+    const policy = loadPolicy("policy.yaml", base);
+    assert.deepEqual(policy, defaultPolicy());
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
