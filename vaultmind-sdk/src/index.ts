@@ -4,4 +4,4 @@ export { AgentEngine, DEMO_AGENTS } from "./agent-engine";
 export type { AgentSignal, AgentConfig } from "./agent-engine";
 export { ChpGate } from "./chp/gate";
 export type { ChpAction, ChpState, ProposedAction, ChpDecision, Provenance, RiskPolicy } from "./chp/gate";
-export { loadPolicy, defaultPolicy, defaultPolicyPath } from "./chp/policy";
+export { loadPolicy, defaultPolicy, defaultPolicyBase, defaultPolicyPath, resolvePolicyPath } from "./chp/policy";
