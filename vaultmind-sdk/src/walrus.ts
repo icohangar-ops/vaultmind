@@ -101,7 +101,7 @@ export async function uploadStrategyConfig(config: StrategyConfig): Promise<Walr
     uploadedAt: new Date().toISOString(),
   });
 
-  return uploadToWalrus(payload, "strategy-config");
+  return uploadToWalrus(payload);
 }
 
 export async function uploadBacktestResult(result: BacktestResult): Promise<WalrusUploadResult> {
@@ -112,7 +112,7 @@ export async function uploadBacktestResult(result: BacktestResult): Promise<Walr
     uploadedAt: new Date().toISOString(),
   });
 
-  return uploadToWalrus(payload, "backtest-result");
+  return uploadToWalrus(payload);
 }
 
 export async function uploadAgentMemory(memory: AgentMemory): Promise<WalrusUploadResult> {
@@ -122,7 +122,7 @@ export async function uploadAgentMemory(memory: AgentMemory): Promise<WalrusUplo
     ...memory,
   });
 
-  return uploadToWalrus(payload, "agent-memory");
+  return uploadToWalrus(payload);
 }
 
 export async function uploadAuditLog(log: AuditLog): Promise<WalrusUploadResult> {
@@ -132,7 +132,7 @@ export async function uploadAuditLog(log: AuditLog): Promise<WalrusUploadResult>
     ...log,
   });
 
-  return uploadToWalrus(payload, "audit-log");
+  return uploadToWalrus(payload);
 }
 
 // ========== Download Functions ==========
@@ -166,11 +166,26 @@ interface WalrusUploadResponse {
   blobId?: string;
 }
 
-async function uploadToWalrus(content: string, epoch?: string): Promise<WalrusUploadResult> {
+/** Store epochs requested for every uploaded blob (testnet default). */
+const WALRUS_EPOCHS = 5;
+
+/**
+ * Builds the Walrus publisher upload URL for a blob PUT. The epoch count is
+ * validated so a misused label can never reach the query string again.
+ * Exported for regression tests; intentionally absent from index.ts.
+ */
+export function buildPublisherUploadUrl(epochs: number): string {
+  if (!Number.isInteger(epochs) || epochs <= 0) {
+    throw new Error(`Walrus store epochs must be a positive integer, received ${epochs}`);
+  }
+  return `${WALRUS_PUBLISHER_URL}/v1/blobs?epochs=${epochs}`;
+}
+
+async function uploadToWalrus(content: string, epochs: number = WALRUS_EPOCHS): Promise<WalrusUploadResult> {
   const encoder = new TextEncoder();
   const bytes = encoder.encode(content);
 
-  const response = await fetch(`${WALRUS_PUBLISHER_URL}/v1/blobs?epochs=${epoch || "5"}`, {
+  const response = await fetch(buildPublisherUploadUrl(epochs), {
     method: "PUT",
     body: bytes,
     headers: {
