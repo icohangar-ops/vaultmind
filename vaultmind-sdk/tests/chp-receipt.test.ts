@@ -161,6 +161,24 @@ test("verifyExecutionReceipt: rejects a policy-version mismatch", () => {
   if (!verdict.ok) assert.match(verdict.reason, /policy_version/);
 });
 
+test("verifyExecutionReceipt: the boundary compares the LIVE gate policy, not the receipt self-report", () => {
+  // Regression for the prelint sibling finding: the engine passed
+  // `receipt.policy_version` as the expected version — a vacuous
+  // self-comparison that would let a receipt signed under a rotated
+  // policy pass verification. The gate policy is the source of truth.
+  const stale = issueAllow({ policy_version: "0.9-legacy" });
+  const gatePolicyVersion = "1.0-default"; // what chpGate.getPolicy().version returns
+  const verdict = verifyExecutionReceipt(
+    stale,
+    { argsHash: stale.args_hash, policyVersion: gatePolicyVersion, key: KEY },
+    new InMemoryReplayStore(),
+  );
+  assert.deepEqual(verdict, {
+    ok: false,
+    reason: "receipt policy_version 0.9-legacy != 1.0-default",
+  });
+});
+
 test("verifyExecutionReceipt: consumes the nonce exactly once — replay is a deny", () => {
   const replay = new InMemoryReplayStore();
   const receipt = issueAllow();
@@ -256,6 +274,73 @@ test("Agent loop: a replay-log write failure refuses the action before the post 
     // Nothing applied: the R0/parity-verified post state must not land.
     const sui = engine.getMemory().positionSnapshot?.tokens.find((t) => t.symbol === "SUI");
     assert.equal(sui?.amount, 2000);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("FileReplayStore: prunes entries older than maxAgeMs on load and compacts the log", () => {
+  const dir = mkdtempSync(join(tmpdir(), "vaultmind-replay-prune-"));
+  try {
+    const logPath = join(dir, "state", "replay-nonces.jsonl");
+    mkdirSync(join(dir, "state"), { recursive: true });
+    const fresh = {
+      nonce: "fresh-nonce",
+      consumedAt: new Date().toISOString(),
+      argsHash: "h",
+      tool: "t",
+      resource: "r",
+    };
+    const stale = {
+      nonce: "stale-nonce",
+      consumedAt: new Date(Date.now() - 2 * 300_000).toISOString(),
+      argsHash: "h",
+      tool: "t",
+      resource: "r",
+    };
+    const unparseable = {
+      nonce: "odd-nonce",
+      consumedAt: "not-a-timestamp",
+      argsHash: "h",
+      tool: "t",
+      resource: "r",
+    };
+    writeFileSync(
+      logPath,
+      [fresh, stale, unparseable].map((r) => JSON.stringify(r)).join("\n") + "\n",
+      "utf-8",
+    );
+    const pruned = new FileReplayStore(logPath, 300_000);
+    // Stale is forgotten (it cannot be replayed by a valid receipt — it
+    // is expired); fresh and unparseable-timestamp records survive.
+    assert.equal(pruned.seen("stale-nonce"), false);
+    assert.equal(pruned.seen("fresh-nonce"), true);
+    assert.equal(pruned.seen("odd-nonce"), true);
+    // The log is compacted on disk: a fresh instance agrees.
+    const reopened = new FileReplayStore(logPath, 300_000);
+    assert.equal(reopened.seen("stale-nonce"), false);
+    assert.equal(reopened.seen("fresh-nonce"), true);
+    assert.equal(reopened.seen("odd-nonce"), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("FileReplayStore: without maxAgeMs the store keeps every entry regardless of age", () => {
+  const dir = mkdtempSync(join(tmpdir(), "vaultmind-replay-keepall-"));
+  try {
+    const logPath = join(dir, "state", "replay-nonces.jsonl");
+    mkdirSync(join(dir, "state"), { recursive: true });
+    const stale = {
+      nonce: "stale-nonce",
+      consumedAt: new Date(Date.now() - 10 * 300_000).toISOString(),
+      argsHash: "h",
+      tool: "t",
+      resource: "r",
+    };
+    writeFileSync(logPath, JSON.stringify(stale) + "\n", "utf-8");
+    const store = new FileReplayStore(logPath);
+    assert.equal(store.seen("stale-nonce"), true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

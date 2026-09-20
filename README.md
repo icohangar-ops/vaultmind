@@ -186,8 +186,10 @@ arguments, policy version, risk tier, 300s expiry, one-time nonce) via
 HMAC-SHA256 over canonical JSON (`src/chp/ledger.ts` `canonicalJson`), then
 verifies it at the execution boundary and consumes the nonce before the
 parity-verified post state lands. Replaying a receipt is a deny; consumed nonces persist in a JSONL replay
-log (`VAULTMIND_CHP_REPLAY_LOG`, default `state/replay-nonces.jsonl`), and a
-replay-log **write failure refuses the action fail-closed** (CHP R0) — the
+log (`VAULTMIND_CHP_REPLAY_LOG`, default `state/replay-nonces.jsonl`); entries older than the receipt
+TTL (300s) are pruned on startup and the log compacted — a nonce past the TTL cannot be replayed by a
+valid receipt, so this bounds startup cost with no security regression; and a replay-log **write failure
+refuses the action fail-closed** (CHP R0) — the
 refusal is recorded in the decision ledger, which is the operator signal;
 replay protection never silently degrades to in-memory-only. Fail-closed:
 there is no committed signing key —
