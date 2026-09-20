@@ -13,6 +13,15 @@ import type { AgentMemory, PositionSnapshot, ExecutionEntry } from "./walrus";
 import { ChpGate, type ChpAction } from "./chp/gate";
 import { HardenedChpGate, type HardenedOutcome } from "./chp/hardened-gate";
 import { DecisionLedger, defaultLedgerPath } from "./chp/ledger";
+import {
+  RECEIPT_TTL_MS,
+  hashVaultActionArgs,
+  issueVaultActionReceipt,
+  resolveReceiptKey,
+  vaultActionReceiptArgs,
+  verifyExecutionReceipt,
+} from "./chp/receipt";
+import { FileReplayStore, defaultReplayLogPath, type ReplayStore } from "./chp/replay";
 
 export interface AgentSignal {
   action: "buy" | "sell" | "hold" | "rebalance";
@@ -60,12 +69,15 @@ export class AgentEngine {
   private signalCount = 0;
   private chpGate: ChpGate;
   private hardened: HardenedChpGate;
+  private readonly receiptKeyOverride?: string;
+  private readonly receiptReplay: ReplayStore;
 
   constructor(
     config: AgentConfig,
     initialMemory?: AgentMemory,
     chpGate?: ChpGate,
     ledger: DecisionLedger = new DecisionLedger(defaultLedgerPath()),
+    receipts?: { key?: string; replay?: ReplayStore },
   ) {
     this.config = config;
     this.memory = initialMemory ?? defaultMemory(config);
@@ -73,6 +85,10 @@ export class AgentEngine {
     // default if missing). Every capital-moving signal passes through it.
     this.chpGate = chpGate ?? new ChpGate();
     this.hardened = new HardenedChpGate({ spend: this.chpGate, ledger });
+    this.receiptKeyOverride = receipts?.key;
+    // Default to the JSONL file store so consumed approvals survive a
+    // restart; tests can inject the in-memory store.
+    this.receiptReplay = receipts?.replay ?? new FileReplayStore(defaultReplayLogPath());
   }
 
   /** Expose the Profile B spend gate for provenance inspection. */
@@ -160,6 +176,69 @@ export class AgentEngine {
       if (!outcome.allowed) {
         return this.record(this.refusalEntry(signal, vaultId, outcome));
       }
+
+      // ─── Row-22 tool-approval receipt ──────────────────────────
+      // A gate verdict — even LOCKED — is an allowlist answer, not
+      // authorization. Issue a receipt binding actor/tool/resource/exact
+      // action args/policy/risk/expiry/nonce, then verify it at the
+      // execution boundary. Fail-closed: resolveReceiptKey throws when
+      // VAULTMIND_CHP_RECEIPT_KEY is unset, and a failed verification or
+      // an unresolvable key refuses the action before the post-state is
+      // applied.
+      let receiptActor: string;
+      let receiptNonce: string;
+      try {
+        const receiptKey = resolveReceiptKey(this.receiptKeyOverride);
+        const args = vaultActionReceiptArgs(
+          signal.action as "buy" | "sell" | "rebalance",
+          signal.token,
+          signal.amount,
+          vaultId,
+        );
+        const argsHash = hashVaultActionArgs(args);
+        const receipt = issueVaultActionReceipt(
+          {
+            actor: confirmedBy ?? "chp:policy-engine",
+            resource: `vaultmind:execute:${vaultId}:${signal.token}`,
+            args_hash: argsHash,
+            policy_version: this.chpGate.getPolicy().version,
+            risk: this.receiptRiskFor(signal.amount),
+            decision: "allow",
+            ttlMs: RECEIPT_TTL_MS,
+          },
+          receiptKey,
+        );
+        const receiptCheck = verifyExecutionReceipt(
+          receipt,
+          { argsHash, policyVersion: receipt.policy_version, key: receiptKey },
+          this.receiptReplay,
+        );
+        if (!receiptCheck.ok) {
+          return this.record({
+            timestamp: new Date().toISOString(),
+            action: `${signal.action} ${signal.token}`,
+            vaultId,
+            result: "failure",
+            details: `CHP receipt verification failed: ${receiptCheck.reason}`,
+            profitDelta: 0,
+            chpDecisionId: outcome.record?.decision_id,
+          });
+        }
+        receiptActor = receiptCheck.receipt.actor;
+        receiptNonce = receiptCheck.receipt.nonce;
+      } catch (error) {
+        // resolveReceiptKey throws fail-closed on a missing/blank key.
+        return this.record({
+          timestamp: new Date().toISOString(),
+          action: `${signal.action} ${signal.token}`,
+          vaultId,
+          result: "failure",
+          details: `CHP receipt: ${(error as Error).message}`,
+          profitDelta: 0,
+          chpDecisionId: outcome.record?.decision_id,
+        });
+      }
+
       // The post-action state was parity-verified by the foundation pass —
       // apply it deterministically instead of sampling a random snapshot.
       if (outcome.post) {
@@ -174,6 +253,8 @@ export class AgentEngine {
         details: signal.reasoning,
         profitDelta: Math.round(profitDelta),
         chpDecisionId: outcome.record?.decision_id,
+        receiptActor,
+        receiptNonce,
       });
     }
 
@@ -188,6 +269,17 @@ export class AgentEngine {
   }
 
   // ── Internals ──────────────────────────────────────────────
+
+  /**
+   * Deterministic row-22 receipt risk tier from the action amount: at or
+   * above 1000 units the approval is high risk, any positive amount is
+   * medium, and a zero-amount action is low.
+   */
+  private receiptRiskFor(amount: number): "low" | "medium" | "high" {
+    if (amount >= 1000) return "high";
+    if (amount > 0) return "medium";
+    return "low";
+  }
 
   private refusalEntry(signal: AgentSignal, vaultId: string, outcome: HardenedOutcome): ExecutionEntry {
     return {

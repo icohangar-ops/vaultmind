@@ -177,6 +177,23 @@ reason and decision id) and are **not** applied. Inject a custom gate via
 `new AgentEngine(config, memory, chpGate)` and inspect provenance / grant
 approval via `engine.getChpGate()`.
 
+**Tool-approval receipts** (`src/chp/receipt.ts`, `src/chp/replay.ts`): a gate
+verdict — even `LOCKED` — is an allowlist answer, not authorization. Before a
+capital-moving action is applied, `executeSignal()` issues a signed,
+single-use tool-approval receipt (actor, tool `vault_execute`, resource
+`vaultmind:execute:<vaultId>:<asset>`, SHA-256 hash over the exact action
+arguments, policy version, risk tier, 300s expiry, one-time nonce) via
+HMAC-SHA256 over canonical JSON (`src/chp/ledger.ts` `canonicalJson`), then
+verifies it at the execution boundary and consumes the nonce before the
+parity-verified post state lands. Replaying a receipt is a deny; consumed
+nonces persist in a JSONL replay log (`VAULTMIND_CHP_REPLAY_LOG`, default
+`state/replay-nonces.jsonl`). Fail-closed: there is no committed signing key —
+`VAULTMIND_CHP_RECEIPT_KEY` must be set (explicitly injectable via
+`new AgentEngine(config, memory, chpGate, ledger, { key })` for tests), and an
+unset or blank key refuses every capital-moving action. `ExecutionEntry`
+records `receiptActor` (the named confirmer, or `chp:policy-engine` for
+autonomous execution) and `receiptNonce` (the replay audit key).
+
 Run the gate tests (Node's native TypeScript support, no build step or extra
 dependencies):
 
@@ -325,6 +342,32 @@ VaultMind's agentic vault system leverages the [MAPS framework](https://mojoaist
 **Technologies:** Sui Move, Walrus Storage, AI Agent Execution
 
 Built for [Sui Overflow 2026 — The Agentic Web](https://www.deepsurge.xyz/) ($500K prize pool)
+
+## Propagation Notes (wave B)
+
+- **Row 22 — tool-approval receipts: adopted.** VaultMind already routed every
+  capital-moving action through the CHP gate (`vaultmind-sdk/src/chp/gate.ts`),
+  but a gate verdict only answered the allowlist question. The receipt layer
+  (`vaultmind-sdk/src/chp/receipt.ts`, replay store in
+  `vaultmind-sdk/src/chp/replay.ts`) now binds the named actor, resource,
+  exact action arguments, policy version, risk tier, and expiry to a signed,
+  single-use HMAC receipt that `AgentEngine.executeSignal()` verifies and
+  consumes at the execution boundary (`vaultmind-sdk/src/agent-engine.ts`)
+  before the parity-verified post state is applied — fail-closed when
+  `VAULTMIND_CHP_RECEIPT_KEY` is unset, replay-protected through a persisted
+  JSONL nonce log. The pattern matches the cognitrader-bsc and
+  deepbook-trading-agent adoptions (canonical JSON + HMAC-SHA256 receipts,
+  in-memory and file-backed replay stores, fail-closed key resolution).
+- **Row 5 — deterministic outcome-calibrated governor: reversed.** The row's
+  reversal condition — no outcome stream frequent enough to regress against —
+  fires against the current state: the engine records a single simulated
+  `profitDelta` per applied action in the Walrus audit log
+  (`vaultmind-sdk/src/walrus.ts`) with no persisted, timestamped outcome
+  history and no parameter-tuning consumer, so a calibration loop would be
+  regressing against fabricated or near-empty data. The deterministic policy
+  gate (`vaultmind-sdk/src/chp/policy.ts`, `src/chp/gate.ts`) plus row-22
+  receipts already cover the safety goal the governor would serve. Revisit
+  when the vault telemetry stream is real and dense enough to regress against.
 
 ## License
 
