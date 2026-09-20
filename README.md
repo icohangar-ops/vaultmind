@@ -370,16 +370,20 @@ Built for [Sui Overflow 2026 — The Agentic Web](https://www.deepsurge.xyz/) ($
   JSONL nonce log. The pattern matches the cognitrader-bsc and
   deepbook-trading-agent adoptions (canonical JSON + HMAC-SHA256 receipts,
   in-memory and file-backed replay stores, fail-closed key resolution).
-- **Row 5 — deterministic outcome-calibrated governor: reversed.** The row's
-  reversal condition — no outcome stream frequent enough to regress against —
-  fires against the current state: the engine records a single simulated
-  `profitDelta` per applied action in the Walrus audit log
-  (`vaultmind-sdk/src/walrus.ts`) with no persisted, timestamped outcome
-  history and no parameter-tuning consumer, so a calibration loop would be
-  regressing against fabricated or near-empty data. The deterministic policy
-  gate (`vaultmind-sdk/src/chp/policy.ts`, `src/chp/gate.ts`) plus row-22
-  receipts already cover the safety goal the governor would serve. Revisit
-  when the vault telemetry stream is real and dense enough to regress against.
+- **Row 5 — deterministic governor over probabilistic judgment: reversed.**
+  The row's own condition — adopt where real probabilistic/LLM judgment sits
+  in a decision path, reversing when LLM calls are cheap, idempotent, and
+  retried upstream — does not hold here in either direction: the execution
+  engine is a documented simulation (`vaultmind-sdk/src/agent-engine.ts`,
+  "Simulates AI agent trading logic for demo purposes"), so no real LLM
+  judgment enters the trade path for a governor to dispose of, and labeled
+  fallbacks would be a second code path maintaining nothing. The safety goal
+  the governor would serve is already covered: the deterministic policy gate
+  (`vaultmind-sdk/src/chp/policy.ts`, `src/chp/gate.ts`) plus row-22
+  receipts govern every action. Revisit when a real LLM judgment enters the
+  execution path (the simulation becomes a real engine) — then adopt the
+  governor and labeled-fallback discipline for that surface, unless the
+  calls are cheap, idempotent, and retried upstream.
 
 ## License
 
