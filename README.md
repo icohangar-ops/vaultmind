@@ -185,14 +185,24 @@ single-use tool-approval receipt (actor, tool `vault_execute`, resource
 arguments, policy version, risk tier, 300s expiry, one-time nonce) via
 HMAC-SHA256 over canonical JSON (`src/chp/ledger.ts` `canonicalJson`), then
 verifies it at the execution boundary and consumes the nonce before the
-parity-verified post state lands. Replaying a receipt is a deny; consumed
-nonces persist in a JSONL replay log (`VAULTMIND_CHP_REPLAY_LOG`, default
-`state/replay-nonces.jsonl`). Fail-closed: there is no committed signing key —
+parity-verified post state lands. Replaying a receipt is a deny; consumed nonces persist in a JSONL replay
+log (`VAULTMIND_CHP_REPLAY_LOG`, default `state/replay-nonces.jsonl`), and a
+replay-log **write failure refuses the action fail-closed** (CHP R0) — the
+refusal is recorded in the decision ledger, which is the operator signal;
+replay protection never silently degrades to in-memory-only. Fail-closed:
+there is no committed signing key —
 `VAULTMIND_CHP_RECEIPT_KEY` must be set (explicitly injectable via
 `new AgentEngine(config, memory, chpGate, ledger, { key })` for tests), and an
 unset or blank key refuses every capital-moving action. `ExecutionEntry`
 records `receiptActor` (the named confirmer, or `chp:policy-engine` for
 autonomous execution) and `receiptNonce` (the replay audit key).
+
+Denomination note: receipt risk tiers are computed from the raw action
+amount (token units), not a USD equivalent — anchoring them to real
+financial exposure needs a price feed the engine deliberately does not
+have (same reasoning as the row-5 reversal below), so until then the tier
+is a relative, unit-denominated label and "high" may be unreachable under
+the policy spend caps.
 
 Run the gate tests (Node's native TypeScript support, no build step or extra
 dependencies):

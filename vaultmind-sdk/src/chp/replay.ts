@@ -88,11 +88,17 @@ export class FileReplayStore implements ReplayStore {
       mkdirSync(path.dirname(this.filePath), { recursive: true });
       appendFileSync(this.filePath, `${JSON.stringify(record)}\n`, "utf-8");
     } catch (error) {
-      // The in-memory set is already updated: this process will not replay.
-      // Persistence failures surface loudly instead of being swallowed — a
-      // silent gap in the replay log is a cross-restart replay risk.
+      // Fail closed (CHP R0): if the nonce cannot be persisted, the caller
+      // must NOT apply the action — in-memory-only consumption would leave
+      // a cross-restart replay window inside the receipt TTL. The in-memory
+      // set is still updated, so this receipt cannot be honored twice
+      // in-process either; callers surface the throw as a refusal recorded
+      // in the decision ledger, which is the operator signal.
       console.error(
-        `[chp] replay log ${this.filePath} write failed: ${error instanceof Error ? error.message : String(error)}`,
+        `[chp] replay log ${this.filePath} write failed (refusing the action): ${error instanceof Error ? error.message : String(error)}`,
+      );
+      throw new Error(
+        `replay-log persistence failed for nonce ${record.nonce}: refusing the action fail-closed`,
       );
     }
   }

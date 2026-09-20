@@ -227,7 +227,9 @@ export class AgentEngine {
         receiptActor = receiptCheck.receipt.actor;
         receiptNonce = receiptCheck.receipt.nonce;
       } catch (error) {
-        // resolveReceiptKey throws fail-closed on a missing/blank key.
+        // Fail-closed throws from the receipt layer: a missing/blank key
+        // (resolveReceiptKey) and a replay-log persistence failure (the
+        // store refuses to degrade to in-memory-only protection).
         return this.record({
           timestamp: new Date().toISOString(),
           action: `${signal.action} ${signal.token}`,
@@ -258,6 +260,10 @@ export class AgentEngine {
       });
     }
 
+    // Hold bypass: `hold` moves no capital and mutates no vault state —
+    // the gate and receipt layers are bypassed by design. If hold semantics
+    // ever expand (fee accrual, snapshot commits, any auditable write),
+    // this exemption must be revisited.
     return this.record({
       timestamp: new Date().toISOString(),
       action: `${signal.action} ${signal.token}`,
@@ -274,6 +280,13 @@ export class AgentEngine {
    * Deterministic row-22 receipt risk tier from the action amount: at or
    * above 1000 units the approval is high risk, any positive amount is
    * medium, and a zero-amount action is low.
+   *
+   * Units are the raw signal amount (token units in this engine), NOT a
+   * USD-equivalent: anchoring tiers to real financial exposure needs a
+   * price feed the engine deliberately does not have (same reasoning as
+   * the row-5 reversal, see README). Until such a feed exists the tier is
+   * a relative, unit-denominated label — under the policy spend caps
+   * "high" may be unreachable in production.
    */
   private receiptRiskFor(amount: number): "low" | "medium" | "high" {
     if (amount >= 1000) return "high";

@@ -219,6 +219,48 @@ test("FileReplayStore: persists consumed nonces across instances and skips corru
   }
 });
 
+test("FileReplayStore: persistence failure fails closed — consume throws, nonce stays burned", () => {
+  const dir = mkdtempSync(join(tmpdir(), "vaultmind-replay-broken-"));
+  try {
+    // A file where the log's parent directory should be: mkdir/append fail.
+    const blocker = join(dir, "blocker");
+    writeFileSync(blocker, "not a directory", "utf-8");
+    const store = new FileReplayStore(join(blocker, "child", "replay-nonces.jsonl"));
+    const record = { nonce: "n-1", consumedAt: "t", argsHash: "h", tool: "t", resource: "r" };
+    assert.throws(() => store.consume(record), /fail-closed/);
+    // The nonce is still burned in-memory: the same receipt cannot be
+    // honored twice in-process even though persistence failed.
+    assert.equal(store.seen("n-1"), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Agent loop: a replay-log write failure refuses the action before the post state lands", () => {
+  const dir = mkdtempSync(join(tmpdir(), "vaultmind-replay-engine-"));
+  try {
+    const blocker = join(dir, "blocker");
+    writeFileSync(blocker, "not a directory", "utf-8");
+    const brokenReplay = new FileReplayStore(join(blocker, "child", "replay-nonces.jsonl"));
+    const engine = new AgentEngine(DEMO_AGENTS[0], undefined, undefined, tmpLedger(), {
+      key: KEY,
+      replay: brokenReplay,
+    });
+    const entry = engine.executeSignal(
+      { action: "buy", token: "SUI", amount: 185, confidence: 0.8, reasoning: "broken log" },
+      "vault-1",
+      "sam@cubiczan.com",
+    );
+    assert.equal(entry.result, "failure");
+    assert.match(entry.details, /replay-log persistence failed/);
+    // Nothing applied: the R0/parity-verified post state must not land.
+    const sui = engine.getMemory().positionSnapshot?.tokens.find((t) => t.symbol === "SUI");
+    assert.equal(sui?.amount, 2000);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── AgentEngine wiring at the execution boundary ─────────────────────
 
 test("Agent loop: refuses the action fail-closed when no receipt key is configured", () => {
