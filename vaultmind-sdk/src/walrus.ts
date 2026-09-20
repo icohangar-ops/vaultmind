@@ -74,6 +74,10 @@ export interface ExecutionEntry {
   profitDelta: number;
   /** Decision-ledger id when the action was recorded through the CHP gate. */
   chpDecisionId?: string;
+  /** Row-22 receipt: actor that authorized the applied action. */
+  receiptActor?: string;
+  /** Row-22 receipt: consumed single-use nonce (replay audit key). */
+  receiptNonce?: string;
 }
 
 export interface AuditLog {

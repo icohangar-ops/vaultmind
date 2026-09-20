@@ -1,0 +1,2 @@
+# Runtime state — consumed receipt nonces (replay log), never commit.
+state/

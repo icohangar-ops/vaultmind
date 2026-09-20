@@ -495,7 +495,7 @@ test("Agent loop: spend policy block is surfaced as a CHP gate failure", () => {
 
 test("Agent loop: confirmed action applies the parity-verified post state and seals a record", () => {
   const ledger = tmpLedger();
-  const engine = new AgentEngine(DEMO_AGENTS[0], undefined, undefined, ledger);
+  const engine = new AgentEngine(DEMO_AGENTS[0], undefined, undefined, ledger, { key: "test-receipt-key" });
   const entry = engine.executeSignal(
     { action: "buy", token: "SUI", amount: 185, confidence: 0.8, reasoning: "momentum entry" },
     "vault-1",
@@ -503,6 +503,9 @@ test("Agent loop: confirmed action applies the parity-verified post state and se
   );
   assert.equal(entry.result, "success");
   assert.ok(entry.chpDecisionId);
+  // Row-22 boundary: the applied action carries its approval receipt.
+  assert.equal(entry.receiptActor, "sam@cubiczan.com");
+  assert.ok(entry.receiptNonce);
 
   const snapshot = engine.getMemory().positionSnapshot;
   const sui = snapshot?.tokens.find((t) => t.symbol === "SUI");
@@ -536,12 +539,14 @@ test("Agent loop: human lock can be disabled via env for autonomous operation", 
   process.env[HUMAN_LOCK_ENV] = "0";
   try {
     const ledger = tmpLedger();
-    const engine = new AgentEngine(DEMO_AGENTS[0], undefined, undefined, ledger);
+    const engine = new AgentEngine(DEMO_AGENTS[0], undefined, undefined, ledger, { key: "test-receipt-key" });
     const entry = engine.executeSignal(
       { action: "buy", token: "SUI", amount: 185, confidence: 0.8, reasoning: "autonomous" },
       "vault-1",
     );
     assert.equal(entry.result, "success");
+    // Autonomous execution records the policy-engine actor.
+    assert.equal(entry.receiptActor, "chp:policy-engine");
     const records = ledger.list();
     assert.equal(records.length, 1);
     assert.equal(records[0].session_status, "PROVISIONAL_LOCK");
