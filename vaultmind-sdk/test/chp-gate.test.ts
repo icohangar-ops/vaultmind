@@ -111,7 +111,7 @@ function makeAgentConfig(): AgentConfig {
 test("executeSignal blocks an over-max signal and records a failure", () => {
   const gate = new ChpGate(makePolicy({ maxNotionalUsd: 1000, perAssetLimits: {} }));
   const engine = new AgentEngine(makeAgentConfig(), undefined, gate);
-  const signal: AgentSignal = { action: "buy", token: "USDC", amount: 5000, confidence: 0.9, reasoning: "oversized" };
+  const signal: AgentSignal = { action: "buy", token: "SUI", amount: 5000, confidence: 0.9, reasoning: "oversized" };
   const entry = engine.executeSignal(signal, "vault-1");
   assert.equal(entry.result, "failure");
   assert.match(entry.details, /CHP gate/);
@@ -120,8 +120,10 @@ test("executeSignal blocks an over-max signal and records a failure", () => {
 test("executeSignal lets an under-threshold signal through the gate", () => {
   const gate = new ChpGate(makePolicy({ maxNotionalUsd: 100000, hitlThresholdUsd: 100000, perAssetLimits: {} }));
   const engine = new AgentEngine(makeAgentConfig(), undefined, gate);
-  const signal: AgentSignal = { action: "buy", token: "USDC", amount: 100, confidence: 0.9, reasoning: "small buy" };
-  const entry = engine.executeSignal(signal, "vault-1");
+  const signal: AgentSignal = { action: "buy", token: "SUI", amount: 100, confidence: 0.9, reasoning: "small buy" };
+  // The hardened pipeline requires a named human confirmer for any
+  // capital-moving action (VAULTMIND_CHP_REQUIRE_HUMAN_LOCK defaults on).
+  const entry = engine.executeSignal(signal, "vault-1", "ops@cubiczan");
   // Details should be the reasoning, not a CHP rejection.
   assert.doesNotMatch(entry.details, /CHP gate/);
   assert.ok(engine.getChpGate().getLedger().some((e) => e.state === "LOCKED"));

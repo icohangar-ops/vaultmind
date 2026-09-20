@@ -72,6 +72,8 @@ export interface ExecutionEntry {
   result: "success" | "failure";
   details: string;
   profitDelta: number;
+  /** Decision-ledger id when the action was recorded through the CHP gate. */
+  chpDecisionId?: string;
 }
 
 export interface AuditLog {
@@ -95,7 +97,6 @@ export interface AuditAction {
 export async function uploadStrategyConfig(config: StrategyConfig): Promise<WalrusUploadResult> {
   const payload = JSON.stringify({
     type: "strategy_config",
-    version: "1.0",
     ...config,
     uploadedAt: new Date().toISOString(),
   });
@@ -158,6 +159,13 @@ export async function downloadAuditLog(blobId: string): Promise<AuditLog> {
 
 // ========== Low-level Walrus Operations ==========
 
+/** Shape of the Walrus publisher's blob-registration response. */
+interface WalrusUploadResponse {
+  newlyCreated?: { blobObject?: { blobId?: string } };
+  existingBlobObject?: { blobId?: string };
+  blobId?: string;
+}
+
 async function uploadToWalrus(content: string, epoch?: string): Promise<WalrusUploadResult> {
   const encoder = new TextEncoder();
   const bytes = encoder.encode(content);
@@ -175,10 +183,18 @@ async function uploadToWalrus(content: string, epoch?: string): Promise<WalrusUp
     throw new Error(`Walrus upload failed: ${response.status} ${text}`);
   }
 
-  const result = await response.json();
+  const result = (await response.json()) as WalrusUploadResponse;
+
+  const blobId =
+    result.newlyCreated?.blobObject?.blobId ||
+    result.existingBlobObject?.blobId ||
+    result.blobId;
+  if (!blobId) {
+    throw new Error("Walrus upload response did not include a blobId");
+  }
 
   return {
-    blobId: result.newlyCreated?.blobObject?.blobId || result.existingBlobObject?.blobId || result.blobId,
+    blobId,
     size: bytes.length,
     created: new Date().toISOString(),
   };

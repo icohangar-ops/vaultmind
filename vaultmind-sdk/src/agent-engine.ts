@@ -2,10 +2,17 @@
  * VaultMind — Agent Execution Engine
  * Simulates AI agent trading logic for demo purposes.
  * In production, this would connect to real DEXes via Sui SDK.
+ *
+ * Every consequential vault action (buy / sell / rebalance) runs through the
+ * hardened CHP gate before it is applied:
+ *   R0 solvability -> Profile B spend gate -> deterministic adversary
+ *   foundation pass -> human lock -> sealed decision ledger record.
  */
 
 import type { AgentMemory, PositionSnapshot, ExecutionEntry } from "./walrus";
 import { ChpGate, type ChpAction } from "./chp/gate";
+import { HardenedChpGate, type HardenedOutcome } from "./chp/hardened-gate";
+import { DecisionLedger, defaultLedgerPath } from "./chp/ledger";
 
 export interface AgentSignal {
   action: "buy" | "sell" | "hold" | "rebalance";
@@ -24,30 +31,63 @@ export interface AgentConfig {
   rebalanceIntervalMs: number;
 }
 
+/** Deterministic seeded demo vault: 2,000 SUI + 10,000 USDC of cash. */
+export function seededSnapshot(): PositionSnapshot {
+  const tokens = [
+    { symbol: "SUI", amount: 2000, valueSui: 2000 },
+    { symbol: "USDC", amount: 10000, valueSui: 10000 / 1.85 },
+  ];
+  const totalValueSui = tokens.reduce((sum, t) => sum + t.valueSui, 0);
+  return { tokens, totalValueSui, unrealizedPnlBps: 0 };
+}
+
+function defaultMemory(config: AgentConfig): AgentMemory {
+  return {
+    agentId: config.agentId,
+    state: "idle",
+    lastSignal: null,
+    // Seed a funded snapshot so the R0 solvability gate evaluates against
+    // real vault state instead of refusing everything from nothing.
+    positionSnapshot: seededSnapshot(),
+    executionLog: [],
+    updatedAt: new Date().toISOString(),
+  };
+}
+
 export class AgentEngine {
   private config: AgentConfig;
   private memory: AgentMemory;
   private signalCount = 0;
   private chpGate: ChpGate;
+  private hardened: HardenedChpGate;
 
-  constructor(config: AgentConfig, initialMemory?: AgentMemory, chpGate?: ChpGate) {
+  constructor(
+    config: AgentConfig,
+    initialMemory?: AgentMemory,
+    chpGate?: ChpGate,
+    ledger: DecisionLedger = new DecisionLedger(defaultLedgerPath()),
+  ) {
     this.config = config;
-    this.memory = initialMemory || {
-      agentId: config.agentId,
-      state: "idle",
-      lastSignal: null,
-      positionSnapshot: null,
-      executionLog: [],
-      updatedAt: new Date().toISOString(),
-    };
+    this.memory = initialMemory ?? defaultMemory(config);
     // Decision-governance gate. Loads config/policy.yaml (conservative
     // default if missing). Every capital-moving signal passes through it.
     this.chpGate = chpGate ?? new ChpGate();
+    this.hardened = new HardenedChpGate({ spend: this.chpGate, ledger });
   }
 
-  /** Expose the CHP gate for provenance inspection / human approval. */
+  /** Expose the Profile B spend gate for provenance inspection. */
   getChpGate(): ChpGate {
     return this.chpGate;
+  }
+
+  /** Expose the hardened CHP gate (R0 → spend → foundation → lock → record). */
+  getHardenedGate(): HardenedChpGate {
+    return this.hardened;
+  }
+
+  /** The sealed decision ledger (JSONL, integrity-checked on read). */
+  getDecisionLedger(): DecisionLedger {
+    return this.hardened.getDecisionLedger();
   }
 
   getMemory(): AgentMemory {
@@ -92,68 +132,81 @@ export class AgentEngine {
 
   /**
    * Execute a signal and record the result.
+   *
+   * `confirmedBy` is the named human confirmer: with
+   * VAULTMIND_CHP_REQUIRE_HUMAN_LOCK on (the default) a consequential action
+   * without one is refused while its case stays PROVISIONAL_LOCK.
    */
-  executeSignal(signal: AgentSignal, vaultId: string): ExecutionEntry {
+  executeSignal(signal: AgentSignal, vaultId: string, confirmedBy?: string): ExecutionEntry {
     this.memory.state = "executing";
 
-    // ─── CHP decision gate (governance) ───────────────────────
-    // "hold" is not a capital-moving action; everything else is run
-    // through the policy gate. Blocked / HITL-required signals are
-    // recorded as a failed execution and NOT applied to the vault.
+    // ─── Hardened CHP pipeline (governance) ───────────────────
+    // "hold" is not a capital-moving action; everything else runs through
+    // R0 -> spend gate -> foundation -> human lock -> ledger. Refused
+    // signals are recorded as failed executions and NOT applied.
     if (signal.action !== "hold") {
-      const chp = this.chpGate.evaluate({
-        action: signal.action as ChpAction,
-        asset: signal.token,
-        notionalUsd: signal.amount,
-        confidence: signal.confidence,
-        rationale: signal.reasoning,
-      });
-      if (!chp.allowed) {
-        const kind = chp.requiresHuman ? "requires human approval" : "blocked";
-        const gatedEntry: ExecutionEntry = {
-          timestamp: new Date().toISOString(),
-          action: `${signal.action} ${signal.token}`,
+      const outcome = this.hardened.evaluateHardened(
+        {
+          action: signal.action as ChpAction,
+          asset: signal.token,
+          notionalUsd: signal.amount,
+          confidence: signal.confidence,
+          rationale: signal.reasoning,
           vaultId,
-          result: "failure",
-          details: `CHP gate ${kind} (${chp.state}): ${chp.reason} [decision ${chp.provenance.decisionId}]`,
-          profitDelta: 0,
-        };
-        this.memory.executionLog.unshift(gatedEntry);
-        if (this.memory.executionLog.length > 100) {
-          this.memory.executionLog = this.memory.executionLog.slice(0, 100);
-        }
-        this.memory.state = "waiting";
-        this.memory.updatedAt = new Date().toISOString();
-        return gatedEntry;
+        },
+        this.memory.positionSnapshot,
+        confirmedBy,
+      );
+      if (!outcome.allowed) {
+        return this.record(this.refusalEntry(signal, vaultId, outcome));
       }
+      // The post-action state was parity-verified by the foundation pass —
+      // apply it deterministically instead of sampling a random snapshot.
+      if (outcome.post) {
+        this.memory.positionSnapshot = outcome.post;
+      }
+      const profitDelta = signal.action === "sell" ? Math.random() * 0.05 * 1e9 : 0;
+      return this.record({
+        timestamp: new Date().toISOString(),
+        action: `${signal.action} ${signal.token}`,
+        vaultId,
+        result: "success",
+        details: signal.reasoning,
+        profitDelta: Math.round(profitDelta),
+        chpDecisionId: outcome.record?.decision_id,
+      });
     }
 
-    // Simulate execution (always succeeds in demo)
-    const profitDelta = signal.action === "sell"
-      ? Math.random() * 0.05 * 1e9 // 0-5% profit
-      : signal.action === "buy" ? 0
-      : 0;
-
-    const entry: ExecutionEntry = {
+    return this.record({
       timestamp: new Date().toISOString(),
       action: `${signal.action} ${signal.token}`,
       vaultId,
-      result: Math.random() > 0.1 ? "success" : "failure", // 90% success rate
+      result: "success",
       details: signal.reasoning,
-      profitDelta: Math.round(profitDelta),
-    };
+      profitDelta: 0,
+    });
+  }
 
+  // ── Internals ──────────────────────────────────────────────
+
+  private refusalEntry(signal: AgentSignal, vaultId: string, outcome: HardenedOutcome): ExecutionEntry {
+    return {
+      timestamp: new Date().toISOString(),
+      action: `${signal.action} ${signal.token}`,
+      vaultId,
+      result: "failure",
+      details: `CHP gate (${outcome.stage}/${outcome.state}): ${outcome.reason}`,
+      profitDelta: 0,
+    };
+  }
+
+  private record(entry: ExecutionEntry): ExecutionEntry {
     this.memory.executionLog.unshift(entry);
-    // Keep last 100 entries
     if (this.memory.executionLog.length > 100) {
       this.memory.executionLog = this.memory.executionLog.slice(0, 100);
     }
-
-    // Update position snapshot
-    this.memory.positionSnapshot = this.generatePositionSnapshot();
     this.memory.state = "waiting";
     this.memory.updatedAt = new Date().toISOString();
-
     return entry;
   }
 
@@ -185,7 +238,7 @@ export class AgentEngine {
     return { action: "hold", token: "USDC", amount: 0, confidence: 0.6, reasoning: "Yield conditions stable" };
   }
 
-  private arbitrageSignal(data: { suiPrice: number }): AgentSignal {
+  private arbitrageSignal(_data: { suiPrice: number }): AgentSignal {
     // Simulate detecting a spread
     const spread = Math.random() * 100; // 0-100 bps
     if (spread > 50) {
@@ -196,22 +249,6 @@ export class AgentEngine {
       };
     }
     return { action: "hold", token: "SUI", amount: 0, confidence: 0.4, reasoning: "No profitable spread detected" };
-  }
-
-  private generatePositionSnapshot(): PositionSnapshot {
-    const suiAmount = Math.round(Math.random() * 10000 * 1e9) / 1e9;
-    const usdcAmount = Math.round(Math.random() * 5000 * 1e6) / 1e6;
-    const totalValue = suiAmount * 1.85 + usdcAmount;
-    const pnl = (Math.random() * 0.08 - 0.02) * 10000;
-
-    return {
-      tokens: [
-        { symbol: "SUI", amount: suiAmount, valueSui: suiAmount },
-        { symbol: "USDC", amount: usdcAmount, valueSui: usdcAmount / 1.85 },
-      ],
-      totalValueSui: Math.round(totalValue * 100) / 100,
-      unrealizedPnlBps: Math.round(pnl),
-    };
   }
 }
 

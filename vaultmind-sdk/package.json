@@ -1,15 +1,25 @@
 {
   "name": "@vaultmind/sdk",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "VaultMind SDK — Walrus storage + Agent execution for AI-managed DeFi vaults on Sui",
+  "type": "module",
   "main": "src/index.ts",
   "types": "src/index.ts",
   "scripts": {
-    "build": "tsc",
-    "test": "node --import ./test/loader.mjs --test test/*.test.ts"
+    "build": "tsc -p tsconfig.json",
+    "lint": "eslint src test tests",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test test/*.test.ts tests/*.test.ts"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@cubiczan/chp": "^0.1.1"
+  },
   "devDependencies": {
-    "typescript": "^5.0.0"
+    "@eslint/js": "^9.39.2",
+    "@types/node": "^20.19.0",
+    "eslint": "^9.39.2",
+    "tsx": "^4.20.0",
+    "typescript": "^5.0.0",
+    "typescript-eslint": "^8.46.5"
   }
 }
